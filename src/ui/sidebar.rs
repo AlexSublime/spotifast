@@ -536,7 +536,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         if let Some(rect) = art_rect.filter(|_| !floating_art) {
             reserve_expanded_art(ui, rect);
         }
-        contents(app, ui, art_rect.filter(|_| floating_art));
+        contents(app, ui, art_rect.filter(|_| floating_art), false);
         if let Some(rect) = art_rect {
             if floating_art {
                 paint_grid_art_mask(app, ui, rect);
@@ -906,40 +906,59 @@ fn nav_row(
 
 /// Draw Library navigation, shelf controls, search, and the visible rows.
 /// Playlist ownership and text filters are applied before ordering and pin placement.
-fn contents(app: &mut App, ui: &mut egui::Ui, grid_art: Option<Rect>) {
+pub fn show_mobile_library(app: &mut App, ui: &mut egui::Ui) {
+    egui::CentralPanel::default()
+        .frame(
+            Frame::new()
+                .fill(app.palette.window)
+                .inner_margin(Margin::symmetric(18, 0)),
+        )
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("mobile-library")
+                .auto_shrink([false, false])
+                .show(ui, |ui| contents(app, ui, None, true));
+        });
+}
+
+fn contents(app: &mut App, ui: &mut egui::Ui, grid_art: Option<Rect>, mobile: bool) {
     let palette = app.palette;
     let page = app.page().clone();
     let locale = app.locale;
     ui.add_space(4.0);
-    if nav_row(
-        ui,
-        &palette,
-        Icon::House,
-        &gettext(locale, "Home"),
-        page == Page::Home,
-    )
-    .clicked()
+    if !mobile
+        && nav_row(
+            ui,
+            &palette,
+            Icon::House,
+            &gettext(locale, "Home"),
+            page == Page::Home,
+        )
+        .clicked()
     {
         app.actions.push(Action::Open(Page::Home));
     }
-    if nav_row(
-        ui,
-        &palette,
-        Icon::Search,
-        &gettext(locale, "Search"),
-        page == Page::Search,
-    )
-    .clicked()
+    if !mobile
+        && nav_row(
+            ui,
+            &palette,
+            Icon::Search,
+            &gettext(locale, "Search"),
+            page == Page::Search,
+        )
+        .clicked()
     {
         app.actions.push(Action::FocusSearch);
     }
-    ui.add_space(10.0);
-    ui.painter().hline(
-        ui.max_rect().x_range().shrink(4.0),
-        ui.cursor().top(),
-        egui::Stroke::new(1.0, palette.outline),
-    );
-    ui.add_space(10.0);
+    if !mobile {
+        ui.add_space(10.0);
+        ui.painter().hline(
+            ui.max_rect().x_range().shrink(4.0),
+            ui.cursor().top(),
+            egui::Stroke::new(1.0, palette.outline),
+        );
+        ui.add_space(10.0);
+    }
 
     let filter_id = egui::Id::new("sidebar-filter");
     let mut filter = ui
@@ -958,18 +977,19 @@ fn contents(app: &mut App, ui: &mut egui::Ui, grid_art: Option<Rect>) {
         ui.add_space(2.0);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
-            if theme::icon_button(
-                ui,
-                Icon::PanelLeft,
-                16.0,
-                palette.secondary,
-                palette.text,
-                super::keys::platform_shortcut(
-                    &gettext(locale, "Hide sidebar (Ctrl+B)"),
-                    &gettext(locale, "Hide sidebar (Cmd+B)"),
-                ),
-            )
-            .clicked()
+            if !mobile
+                && theme::icon_button(
+                    ui,
+                    Icon::PanelLeft,
+                    16.0,
+                    palette.secondary,
+                    palette.text,
+                    super::keys::platform_shortcut(
+                        &gettext(locale, "Hide sidebar (Ctrl+B)"),
+                        &gettext(locale, "Hide sidebar (Cmd+B)"),
+                    ),
+                )
+                .clicked()
             {
                 app.actions.push(Action::ToggleSidebar);
             }

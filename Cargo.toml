@@ -13,6 +13,7 @@ categories = ["multimedia::audio"]
 [lib]
 name = "spotifast"
 path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
 
 [[bin]]
 name = "spotifast"
@@ -29,10 +30,6 @@ directories = "6"
 # One protected-store API, with only each target's native provider below.
 # Durable Spotify grants must not be copied into ordinary state JSON.
 keyring-core = "1"
-# The whole UI. glow keeps the binary and the dependency tree small; wgpu is
-# not needed for a 2D music client.
-# AccessKit connects egui's control names, states, and actions to native screen readers.
-eframe = { version = "0.36", default-features = false, features = ["accesskit", "glow", "default_fonts", "links", "wayland", "x11", "persistence"] }
 egui = "0.36"
 egui_extras = { version = "0.36", features = ["image", "svg"] }
 # The shared foundation of Spotifast, ZapFast, RekordFlash and TonePush
@@ -75,7 +72,7 @@ fastframe-power = { git = "https://github.com/crmne/fastframe", tag = "v0.6.0" }
 # follows the default output and reopens after a failure. Its cpal 0.18
 # cannot share a build with the cpal 0.16 of librespot's rodio backend (both
 # link ALSA), so that backend is left out.
-fastframe-audio = { git = "https://github.com/crmne/fastframe", tag = "v0.6.0" }
+fastframe-audio = { path = "vendor/fastframe-audio" }
 # The wheel step, the Linux touchpad scale and glide, and the axis a scroll
 # gesture holds.
 fastframe-scroll = { git = "https://github.com/crmne/fastframe", tag = "v0.6.0" }
@@ -165,8 +162,6 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-webpki = { version = "0.103", default-features = false, features = ["ring", "std"] }
 ring = "0.17"
 base64 = "0.22"
-# Native asynchronous file selection on macOS, Windows and Linux desktop portals.
-rfd = "0.17.2"
 rand = "0.9"
 open = "5"
 percent-encoding = "2"
@@ -212,6 +207,19 @@ zbus = { version = "5", default-features = false, features = ["tokio"] }
 # compiles this version.
 x11rb = { version = "0.13", default-features = false }
 
+[target.'cfg(target_os = "android")'.dependencies]
+eframe = { version = "0.36", default-features = false, features = ["android-native-activity", "glow", "default_fonts", "links", "persistence"] }
+winit = { version = "0.30", default-features = false, features = ["android-native-activity"] }
+android-native-keyring-store = "1"
+jni = { version = "0.21.1", default-features = false }
+ndk-context = "0.1.1"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+# Native asynchronous file selection on macOS, Windows and Linux desktop portals.
+rfd = "0.17.2"
+# Desktop window backends and AccessKit stay out of Android's dependency graph.
+eframe = { version = "0.36", default-features = false, features = ["accesskit", "glow", "default_fonts", "links", "wayland", "x11", "persistence"] }
+
 [build-dependencies]
 # Drops unfinished PO entries and compiles catalog text and gettext plural
 # expressions to Rust. Ordinary builds do not need gettext tools.
@@ -235,6 +243,22 @@ demo = []
 # binary at compile time, so building needs cmake, a C++ compiler, and
 # libclang. `--no-default-features` leaves it out.
 milkdrop = ["dep:projectm-sys", "dep:winit", "dep:glutin", "dep:glutin-winit"]
+
+[package.metadata.android]
+package = "rocks.spotifast"
+apk_name = "spotifast"
+build_targets = ["armv7-linux-androideabi", "aarch64-linux-android", "x86_64-linux-android"]
+
+[package.metadata.android.sdk]
+min_sdk_version = 25
+target_sdk_version = 35
+
+[package.metadata.android.application]
+label = "Spotifast"
+extract_native_libs = true
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.INTERNET"
 
 [profile.release]
 lto = "thin"

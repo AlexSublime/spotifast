@@ -44,6 +44,11 @@ fn glew_library(lib: &std::path::Path) -> Option<&'static str> {
 
 fn main() {
     fastframe_i18n::build::compile_catalogs("assets/i18n");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {
+        // CPAL's Oboe backend uses the NDK C++ ABI. The APK is assembled
+        // manually, so link the shared runtime and package it per ABI.
+        println!("cargo:rustc-link-lib=dylib=c++_shared");
+    }
     #[cfg(windows)]
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         println!("cargo:rerun-if-changed=packaging/windows/spotifast.ico");

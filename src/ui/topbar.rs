@@ -193,6 +193,10 @@ fn nav_button(
 }
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
+    if cfg!(target_os = "android") && ui.available_width() < 600.0 {
+        show_mobile(app, ui);
+        return;
+    }
     let palette = app.palette;
     let locale = app.locale;
     let width = ui.available_width();
@@ -625,6 +629,100 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             });
         },
     );
+}
+
+fn show_mobile(app: &mut App, ui: &mut egui::Ui) {
+    let palette = app.palette;
+    let locale = app.locale;
+    let page = app.page().clone();
+    ui.add_space(26.0);
+    ui.spacing_mut().interact_size.y = 44.0;
+    ui.horizontal(|ui| {
+        ui.add_space(16.0);
+        if page == Page::Search {
+            let id = egui::Id::new("global-search");
+            let before = app.search.query.clone();
+            let selected = egui::TextEdit::load_state(ui.ctx(), id)
+                .and_then(|state| state.cursor.char_range())
+                .is_some_and(|range| !range.is_empty());
+            let response = super::widgets::search_field(
+                ui,
+                &palette,
+                locale,
+                id,
+                &mut app.search.query,
+                &gettext(locale, "What do you want to play?"),
+                (ui.available_width() - 56.0).max(120.0),
+            );
+            if theme::icon_button(
+                ui,
+                Icon::Settings,
+                20.0,
+                palette.secondary,
+                palette.text,
+                &gettext(locale, "Settings"),
+            )
+            .clicked()
+            {
+                app.actions.push(Action::Open(Page::Settings));
+            }
+            if app.search.focus_requested {
+                app.search.focus_requested = false;
+                response.request_focus();
+            }
+            if app.search.query != before {
+                if selected || app.search.query.is_empty() {
+                    app.actions.push(Action::EndSearchRun);
+                }
+                app.search.typed_at = Some(std::time::Instant::now());
+            }
+            if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                app.actions.push(Action::Search(app.search.query.clone()));
+            }
+        } else {
+            let title = match page {
+                Page::Home => gettext(locale, "Home"),
+                Page::Search => gettext(locale, "Search"),
+                Page::Albums
+                | Page::Artists
+                | Page::Podcasts
+                | Page::Episodes
+                | Page::LikedSongs
+                | Page::Playlist(_) => gettext(locale, "Library"),
+                Page::Settings => gettext(locale, "Settings"),
+                _ => "Spotifast".into(),
+            };
+            theme::text(ui, title, theme::bold(20.0), palette.text);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.add_space(12.0);
+                if theme::icon_button(
+                    ui,
+                    Icon::Settings,
+                    20.0,
+                    palette.secondary,
+                    palette.text,
+                    &gettext(locale, "Settings"),
+                )
+                .clicked()
+                {
+                    app.actions.push(Action::Open(Page::Settings));
+                }
+                if theme::icon_button(
+                    ui,
+                    Icon::Search,
+                    20.0,
+                    palette.secondary,
+                    palette.text,
+                    &gettext(locale, "Search"),
+                )
+                .clicked()
+                {
+                    app.actions.push(Action::FocusSearch);
+                }
+            });
+        }
+    });
+    ui.add_space(8.0);
 }
 
 fn capitalize(text: &str) -> String {

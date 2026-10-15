@@ -29,7 +29,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, connecting: bool) {
             fastframe_titlebar::drag(ui, drag_rect);
             let top = super::blend(palette.window, palette.accent, 0.10);
             super::widgets::paint_vertical_gradient(ui, rect, top, palette.window);
-            let card_width = 440.0;
+            let card_width = 440.0_f32.min((rect.width() - 32.0).max(240.0));
+            let card_inset = if rect.width() < 600.0 { 24 } else { 36 };
             let proxy_id = egui::Id::new("login-proxy-open");
             let proxy_open = ui
                 .ctx()
@@ -52,7 +53,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, connecting: bool) {
                 .fill(palette.panel)
                 .stroke(Stroke::new(1.0, palette.outline))
                 .corner_radius(CornerRadius::same(theme::RADIUS + 8))
-                .inner_margin(Margin::same(36))
+                .inner_margin(Margin::same(card_inset))
                 .shadow(egui::epaint::Shadow {
                     offset: [0, 16],
                     blur: 48,
@@ -65,7 +66,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, connecting: bool) {
                         .max_height((card.height() - 72.0).max(0.0))
                         .auto_shrink([false, true])
                         .show(ui, |ui| {
-                    ui.set_width(card_width - 72.0);
+                    ui.set_width(card_width - 2.0 * f32::from(card_inset));
                     ui.spacing_mut().item_spacing.y = 8.0;
                     let (logo, _) = ui.allocate_exact_size(Vec2::splat(72.0), egui::Sense::hover());
                     theme::logo(ui, logo.center(), 72.0);

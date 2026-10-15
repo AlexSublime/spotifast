@@ -9,7 +9,17 @@ use std::ffi::OsStr;
 use std::io;
 
 /// Opens a URL or a path in whatever the desktop uses for it.
-#[cfg(not(windows))]
+#[cfg(target_os = "android")]
+pub fn open(target: impl AsRef<OsStr>) -> io::Result<()> {
+    let target = target
+        .as_ref()
+        .to_str()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Android URL is not UTF-8"))?;
+    crate::android::open_url(target).map_err(|error| io::Error::other(error))
+}
+
+/// Opens a URL or a path in whatever the desktop uses for it.
+#[cfg(all(not(windows), not(target_os = "android")))]
 pub fn open(target: impl AsRef<OsStr>) -> io::Result<()> {
     open::that(target.as_ref())
 }

@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 
 use egui::Color32;
 
+#[cfg(target_os = "android")]
+use crate::android::NowPlaying as MediaControls;
 use crate::api::PlayRequest;
 use crate::api::models::{
     Album, Artist, ArtistRef, Device, PlayableItem, PlaybackState, Playlist, PlaylistItem, Queue,
@@ -25,9 +27,11 @@ use crate::settings::{CachedRootlist, SessionState, Settings, ThemeChoice};
 use crate::single_instance::ControlCommand;
 use crate::theme::{self, Palette};
 use crate::util;
+#[cfg(not(target_os = "android"))]
+use fastframe_now_playing::NowPlaying as MediaControls;
 use fastframe_now_playing::{
-    Command as MediaCommand, NowPlaying as MediaControls, Playback as MediaPlayback,
-    Repeat as MediaRepeat, State as MediaState, Track as MediaTrack,
+    Command as MediaCommand, Playback as MediaPlayback, Repeat as MediaRepeat, State as MediaState,
+    Track as MediaTrack,
 };
 
 const REMOTE_POLL_ACTIVE: Duration = Duration::from_secs(4);
@@ -4001,7 +4005,12 @@ impl App {
                 ..MediaState::default()
             },
         };
+        #[cfg(target_os = "android")]
+        let local_playback = self.now_playing().is_some_and(|now| now.local);
         if let Some(controls) = &mut self.media_controls {
+            #[cfg(target_os = "android")]
+            controls.update(state, local_playback);
+            #[cfg(not(target_os = "android"))]
             controls.update(state);
         }
         let playing = self.now_playing().is_some_and(|now| now.playing);

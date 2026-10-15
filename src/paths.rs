@@ -6,6 +6,7 @@
 
 use std::path::PathBuf;
 
+#[cfg(not(target_os = "android"))]
 use directories::ProjectDirs;
 
 #[derive(Clone, Debug)]
@@ -21,24 +22,74 @@ impl AppDirs {
     }
 
     fn for_name(name: &str) -> Self {
-        let project = ProjectDirs::from("me", "paolino", name);
-        match project {
-            Some(project) => Self {
-                config: project.config_dir().to_path_buf(),
-                state: project
-                    .state_dir()
-                    .map(|path| path.to_path_buf())
-                    .unwrap_or_else(|| project.data_local_dir().to_path_buf()),
-                cache: project.cache_dir().to_path_buf(),
-            },
-            None => {
-                let fallback = std::env::current_dir().unwrap_or_default();
-                Self {
-                    config: fallback.join(format!("{name}-config")),
-                    state: fallback.join(format!("{name}-state")),
-                    cache: fallback.join(format!("{name}-cache")),
+        #[cfg(target_os = "android")]
+        {
+            return Self::for_android(name);
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
+            let project = ProjectDirs::from("me", "paolino", name);
+            match project {
+                Some(project) => Self {
+                    config: project.config_dir().to_path_buf(),
+                    state: project
+                        .state_dir()
+                        .map(|path| path.to_path_buf())
+                        .unwrap_or_else(|| project.data_local_dir().to_path_buf()),
+                    cache: project.cache_dir().to_path_buf(),
+                },
+                None => {
+                    let fallback = std::env::current_dir().unwrap_or_default();
+                    Self {
+                        config: fallback.join(format!("{name}-config")),
+                        state: fallback.join(format!("{name}-state")),
+                        cache: fallback.join(format!("{name}-cache")),
+                    }
                 }
             }
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    fn for_android(name: &str) -> Self {
+        use jni::{
+            JavaVM,
+            objects::{JObject, JString},
+        };
+
+        let context = ndk_context::android_context();
+        // SAFETY: android-activity initializes these process-wide JNI handles before main.
+        let vm = unsafe { JavaVM::from_raw(context.vm().cast()) }
+            .expect("Android Java VM is unavailable");
+        let mut env = vm
+            .attach_current_thread()
+            .expect("cannot attach to Android Java VM");
+        // SAFETY: ndk-context keeps the initialized Android Context alive for this process.
+        let context = unsafe { JObject::from_raw(context.context().cast()) };
+        let mut directory = |method: &str| {
+            let file = env
+                .call_method(&context, method, "()Ljava/io/File;", &[])
+                .expect("cannot resolve Android app directory")
+                .l()
+                .expect("Android app directory is null");
+            let path = env
+                .call_method(file, "getAbsolutePath", "()Ljava/lang/String;", &[])
+                .expect("cannot read Android app directory")
+                .l()
+                .expect("Android app directory path is null");
+            let path: String = env
+                .get_string(&JString::from(path))
+                .expect("Android app directory path is invalid")
+                .into();
+            PathBuf::from(path)
+        };
+        let files = directory("getFilesDir").join(name);
+
+        Self {
+            config: files.join("config"),
+            state: files.join("state"),
+            cache: directory("getCacheDir").join(name),
         }
     }
 

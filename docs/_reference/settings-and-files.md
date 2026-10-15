@@ -33,6 +33,10 @@ Spotifast follows each platform's conventions. On Linux:
 | Last run's log | `~/.local/state/spotifast/spotifast.log` | Always |
 | Crash log | `~/.local/state/spotifast/panic.log` | Always |
 
+On Android, settings and durable state live in the app-private
+`files/spotifast/` directory (`config/` and `state/`); disposable caches live
+in `cache/spotifast/`. Android removes these files when the app is uninstalled.
+
 Clearing caches never signs you out. Sign-out from Settings covers the shared
 and personal Web API grants and the independent playback credential. It also
 removes the cached library of every account: playlist pages, the playlist

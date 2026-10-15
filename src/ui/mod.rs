@@ -24,11 +24,14 @@ mod update;
 pub mod widgets;
 pub mod winamp;
 
-use egui::{Align2, Color32, Context, CornerRadius, Frame, Id, Margin, Rect, Stroke, vec2};
+use egui::{
+    Align2, Color32, Context, CornerRadius, Frame, Id, Margin, Rect, Stroke, Vec2, pos2, vec2,
+};
 
 use crate::api::models::pick_image;
 use crate::app::App;
 use crate::backend::AuthStatus;
+use crate::i18n::gettext;
 use crate::model::{Action, Loadable, Page, ToastKind};
 use crate::theme::{self, Icon};
 
@@ -49,6 +52,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         toasts(app, ctx, 20.0);
         caption_buttons(ui, &app.palette, app.locale);
         fastframe_titlebar::resize(ui);
+        return;
+    }
+    if cfg!(target_os = "android") && ui.available_width() < 600.0 {
+        mobile_show(app, ui, ctx);
         return;
     }
     if titlebar_spans_window(cfg!(target_os = "macos"), fastframe_titlebar::enabled()) {
@@ -86,6 +93,226 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     toasts(app, ctx, theme::PLAYER_BAR_HEIGHT + 16.0);
     caption_buttons(ui, &app.palette, app.locale);
     fastframe_titlebar::resize(ui);
+}
+
+fn mobile_show(app: &mut App, ui: &mut egui::Ui, ctx: &Context) {
+    mobile_footer(app, ui);
+    let page = app.page().clone();
+    if matches!(page, Page::Albums) {
+        topbar::show(app, ui);
+        sidebar::show_mobile_library(app, ui);
+    } else {
+        central(app, ui);
+    }
+    devices::popup(app, ctx);
+    dialogs::show(app, ctx);
+    update::show(app, ctx);
+    toasts(app, ctx, 136.0);
+}
+
+fn mobile_footer(app: &mut App, ui: &mut egui::Ui) {
+    use egui::{Align, Layout, Sense};
+
+    let palette = app.palette;
+    egui::Panel::bottom("mobile-footer")
+        .exact_size(140.0)
+        .resizable(false)
+        .show_separator_line(false)
+        .frame(Frame::new().fill(palette.panel).inner_margin(Margin {
+            left: 12,
+            right: 12,
+            top: 6,
+            bottom: 24,
+        }))
+        .show(ui, |ui| {
+            ui.spacing_mut().interact_size = vec2(44.0, 44.0);
+            let now = app.now_playing();
+            let row = ui.available_rect_before_wrap();
+            let player = Rect::from_min_size(row.min, vec2(row.width(), 58.0));
+            mobile_player(app, ui, player, now.as_ref());
+            ui.painter().hline(
+                row.x_range(),
+                player.bottom() + 5.0,
+                Stroke::new(1.0, palette.outline),
+            );
+            let tabs = [
+                (Page::Home, Icon::House, gettext(app.locale, "Home")),
+                (Page::Search, Icon::Search, gettext(app.locale, "Search")),
+                (Page::Albums, Icon::Library, gettext(app.locale, "Library")),
+                (
+                    Page::Settings,
+                    Icon::Settings,
+                    gettext(app.locale, "Settings"),
+                ),
+            ];
+            let width = row.width() / tabs.len() as f32;
+            let top = player.bottom() + 8.0;
+            for (index, (page, icon, label)) in tabs.iter().enumerate() {
+                let rect = Rect::from_min_size(
+                    pos2(row.left() + index as f32 * width, top),
+                    vec2(width, 44.0),
+                );
+                let response =
+                    ui.interact(rect, ui.id().with(("mobile-tab", index)), Sense::click());
+                let active = mobile_tab_active(app.page(), page);
+                let label_text = label.as_ref().to_string();
+                response.widget_info(|| {
+                    egui::WidgetInfo::selected(
+                        egui::WidgetType::Button,
+                        ui.is_enabled(),
+                        active,
+                        label_text.clone(),
+                    )
+                });
+                theme::focus_ring(ui, &response);
+                let color = if active {
+                    palette.accent
+                } else {
+                    palette.secondary
+                };
+                let icon_rect = Rect::from_center_size(
+                    pos2(rect.center().x, rect.top() + 14.0),
+                    Vec2::splat(21.0),
+                );
+                icon.image(color, 21.0).paint_at(ui, icon_rect);
+                let mut text_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(Rect::from_min_max(
+                            pos2(rect.left(), rect.top() + 26.0),
+                            rect.right_bottom(),
+                        ))
+                        .layout(Layout::top_down(Align::Center)),
+                );
+                theme::text(&mut text_ui, label.as_ref(), theme::medium(11.0), color);
+                if response.clicked() {
+                    app.actions.push(Action::Open(page.clone()));
+                }
+            }
+        });
+}
+
+fn mobile_tab_active(current: &Page, tab: &Page) -> bool {
+    match tab {
+        Page::Home => current == &Page::Home,
+        Page::Search => current == &Page::Search,
+        Page::Albums => matches!(
+            current,
+            Page::Albums
+                | Page::Artists
+                | Page::Podcasts
+                | Page::Episodes
+                | Page::LikedSongs
+                | Page::Playlist(_)
+                | Page::Album(_)
+                | Page::Artist(_)
+                | Page::Show(_)
+        ),
+        Page::Settings => current == &Page::Settings,
+        _ => false,
+    }
+}
+
+fn mobile_player(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    rect: Rect,
+    now: Option<&crate::app::NowPlaying>,
+) {
+    use egui::{Align, Layout};
+
+    let palette = app.palette;
+    let art = Rect::from_min_size(rect.min + vec2(2.0, 5.0), Vec2::splat(46.0));
+    if let Some(now) = now {
+        widgets::playing_cover(
+            ui,
+            &palette,
+            app.backend.art(),
+            "mobile-player",
+            app.small_art(now, 46.0),
+            art,
+            5.0,
+        );
+    } else {
+        widgets::paint_cover(ui, &palette, None, art, 5.0, Icon::Music, None);
+    }
+    let title = now.map_or_else(
+        || gettext(app.locale, "Nothing playing").into_owned(),
+        |now| now.title.clone(),
+    );
+    let subtitle = now.map_or_else(
+        || gettext(app.locale, "Choose a song").into_owned(),
+        |now| now.subtitle.clone(),
+    );
+    let text_rect = Rect::from_min_max(
+        pos2(art.right() + 10.0, rect.top() + 8.0),
+        pos2(rect.right() - 102.0, rect.bottom() - 4.0),
+    );
+    let mut text_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(text_rect)
+            .layout(Layout::top_down(Align::Min)),
+    );
+    text_ui.set_clip_rect(text_rect.intersect(ui.clip_rect()));
+    theme::text(&mut text_ui, title, theme::medium(13.0), palette.text);
+    theme::text(
+        &mut text_ui,
+        subtitle,
+        theme::regular(11.5),
+        palette.secondary,
+    );
+
+    let enabled = now.is_some_and(|now| now.can_control);
+    let playing = now.is_some_and(|now| now.playing);
+    let button_rect = Rect::from_min_size(
+        pos2(rect.right() - 88.0, rect.top() + 6.0),
+        vec2(44.0, 46.0),
+    );
+    let mut button_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(button_rect)
+            .layout(Layout::centered_and_justified(egui::Direction::LeftToRight)),
+    );
+    let button = theme::icon_button(
+        &mut button_ui,
+        if playing {
+            Icon::PauseFilled
+        } else {
+            Icon::PlayFilled
+        },
+        22.0,
+        if enabled { palette.text } else { palette.dim },
+        palette.accent,
+        &gettext(app.locale, if playing { "Pause" } else { "Play" }),
+    );
+    if button.clicked() && enabled {
+        app.actions.push(Action::TogglePlay);
+    }
+    let next_rect = Rect::from_min_size(
+        pos2(rect.right() - 44.0, rect.top() + 6.0),
+        vec2(44.0, 46.0),
+    );
+    let mut next_ui = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(next_rect)
+            .layout(Layout::centered_and_justified(egui::Direction::LeftToRight)),
+    );
+    if theme::icon_button(
+        &mut next_ui,
+        Icon::SkipForwardFilled,
+        20.0,
+        if enabled {
+            palette.secondary
+        } else {
+            palette.dim
+        },
+        palette.text,
+        &gettext(app.locale, "Next"),
+    )
+    .clicked()
+        && enabled
+    {
+        app.actions.push(Action::Next);
+    }
 }
 
 /// The main window's narrowest width with these panels open: their least

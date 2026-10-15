@@ -1,0 +1,38 @@
+[package]
+name = "fastframe-audio"
+version = "0.6.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+repository = "https://github.com/crmne/fastframe"
+readme = "README.md"
+
+[features]
+pulseaudio = ["cpal-desktop/pulseaudio"]
+pipewire = ["cpal-desktop/pipewire"]
+
+[dependencies]
+log = "0.4"
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+cpal-desktop = { package = "cpal", version = "0.18.1" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+cpal-android = { package = "cpal", path = "../cpal-api25" }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.60.2", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "warn"
+print_stdout = "warn"
+print_stderr = "warn"

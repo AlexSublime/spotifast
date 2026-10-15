@@ -619,8 +619,11 @@ pub enum Command {
     ChoosePlaylistCover {
         id: String,
         request: u64,
-        selected:
-            std::pin::Pin<Box<dyn std::future::Future<Output = Option<rfd::FileHandle>> + Send>>,
+        selected: std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<Option<std::path::PathBuf>, String>> + Send,
+            >,
+        >,
     },
     /// Start (or restart) the Web API sign-in in the browser.
     SignIn {
@@ -1167,14 +1170,20 @@ impl Backend {
         if self.offline {
             return;
         }
-        let selected = rfd::AsyncFileDialog::new()
-            .set_title("Choose playlist cover")
-            .add_filter("JPEG or PNG image", &["jpg", "jpeg", "png"])
-            .pick_file();
+        #[cfg(not(target_os = "android"))]
+        let selected = {
+            let selected = rfd::AsyncFileDialog::new()
+                .set_title("Choose playlist cover")
+                .add_filter("JPEG or PNG image", &["jpg", "jpeg", "png"])
+                .pick_file();
+            Box::pin(async move { Ok(selected.await.map(|file| file.path().to_path_buf())) }) as _
+        };
+        #[cfg(target_os = "android")]
+        let selected = crate::android::choose_cover(request);
         self.send(Command::ChoosePlaylistCover {
             id,
             request,
-            selected: Box::pin(selected),
+            selected,
         });
     }
 
@@ -1950,9 +1959,13 @@ impl Worker {
                     tokio::spawn(async move {
                         let selected = selected.await;
                         let result = match selected {
-                            None => Ok(None),
-                            Some(file) => tokio::task::spawn_blocking(move || {
-                                crate::playlist_cover::read(file.path()).map(Some)
+                            Err(error) => Err(error),
+                            Ok(None) => Ok(None),
+                            Ok(Some(path)) => tokio::task::spawn_blocking(move || {
+                                let result = crate::playlist_cover::read(&path).map(Some);
+                                #[cfg(target_os = "android")]
+                                let _ = std::fs::remove_file(path);
+                                result
                             })
                             .await
                             .unwrap_or_else(|_| {
@@ -2652,6 +2665,8 @@ impl Worker {
         let attempt = self.authorization_attempt;
         tokio::spawn(async move {
             let mut wait = Duration::from_secs(2);
+            let mut retries_left = 3;
+            let mut rate_limit_retry = false;
             let error = loop {
                 if !lease.current() {
                     let _ = commands.send(Command::SignInEnded { source, attempt });
@@ -2669,8 +2684,37 @@ impl Worker {
                         return;
                     }
                     Err(error @ ApiError::SignInExpired { .. }) => break error,
-                    Err(error) if error.status().is_some_and(|status| status < 500) => break error,
-                    Err(error) => {
+                    Err(ApiError::RateLimited) if !rate_limit_retry => {
+                        rate_limit_retry = true;
+                        log::warn!("Spotify sign-in verification waiting for rate limit cooldown");
+                        loop {
+                            tokio::select! {
+                                _ = client.wait_for_cooldown() => break,
+                                _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                                    if !lease.current()
+                                        || !matches!(gateway.state(source), SessionState::Authorizing)
+                                    {
+                                        let _ = commands.send(Command::SignInEnded { source, attempt });
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        if !lease.current()
+                            || !matches!(gateway.state(source), SessionState::Authorizing)
+                        {
+                            let _ = commands.send(Command::SignInEnded { source, attempt });
+                            return;
+                        }
+                    }
+                    Err(error)
+                        if matches!(error, ApiError::Network(_))
+                            || error.status().is_some_and(|status| status >= 500) =>
+                    {
+                        if retries_left == 0 {
+                            break error;
+                        }
+                        retries_left -= 1;
                         log::warn!("Spotify sign-in verification will retry: {error}");
                         tokio::time::sleep(wait).await;
                         wait = (wait * 2).min(Duration::from_secs(60));
@@ -2679,6 +2723,7 @@ impl Worker {
                             return;
                         }
                     }
+                    Err(error) => break error,
                 }
             };
             if !lease.current() {

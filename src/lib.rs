@@ -1,6 +1,12 @@
 //! Spotifast's internals, exposed so diagnostics and tests can reach them.
 
+extern crate self as spotifast;
+
+pub mod entrypoint;
+
 pub mod account_cache;
+#[cfg(target_os = "android")]
+pub mod android;
 pub mod api;
 pub mod app;
 #[cfg(target_os = "linux")]
@@ -59,3 +65,11 @@ pub mod vis;
 pub mod winamp;
 pub mod window;
 pub mod zeroconf;
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub fn android_main(app: winit::platform::android::activity::AndroidApp) {
+    if let Err(error) = entrypoint::run(app) {
+        log::error!("Spotifast failed to start: {error}");
+    }
+}

@@ -274,6 +274,8 @@ impl NativeStore {
         if self.store.is_none() {
             #[cfg(target_os = "linux")]
             let store = zbus_secret_service_keyring_store::Store::new();
+            #[cfg(target_os = "android")]
+            let store = android_native_keyring_store::Store::new();
             #[cfg(target_os = "macos")]
             let store = apple_native_keyring_store::keychain::Store::new();
             #[cfg(windows)]

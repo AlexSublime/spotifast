@@ -1,0 +1,389 @@
+//! The thin layer that talks to cpal: choosing the device, opening the
+//! stream in the device's sample format, and watching the default output.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
+
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+use crate::plan::{self, Attempt, Choice};
+use crate::{Clock, Device, OpenError, OutputError, OutputOptions, Render};
+
+type BackendError = Box<dyn std::error::Error + Send + Sync>;
+
+/// What the callback and the error callback share with the [`Output`](crate::Output).
+#[derive(Debug, Default)]
+pub(crate) struct Shared {
+    /// A stream error means the stream has to be opened again.
+    pub(crate) failed: AtomicBool,
+    /// Errors not yet taken by the app.
+    pub(crate) errors: Mutex<Vec<OutputError>>,
+}
+
+impl Shared {
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn report(&self, error: cpal::Error) {
+        let reopen = plan::needs_reopen(error.kind());
+        let error = OutputError::from_cpal(&error);
+        if reopen {
+            log::warn!("audio output error, reopening: {error}");
+            self.failed.store(true, Ordering::Release);
+        } else {
+            log::debug!("audio output: {error}");
+        }
+        self.errors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(error);
+    }
+
+    #[cfg(target_os = "android")]
+    pub(crate) fn report(&self, error: impl std::fmt::Display) {
+        self.failed.store(true, Ordering::Release);
+        self.errors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(crate::OutputError::from_message(error.to_string()));
+    }
+}
+
+/// An open stream and what it was opened with.
+pub(crate) struct Live {
+    pub(crate) stream: cpal::Stream,
+    pub(crate) device: String,
+    pub(crate) sample_rate: u32,
+    pub(crate) channels: u16,
+    /// The default output's name when this stream opened on it, for noticing
+    /// that the default changed.
+    pub(crate) default_at_open: Option<String>,
+}
+
+/// Opens the stream the options ask for and starts it, unless `paused`.
+pub(crate) fn open<R: Render>(
+    options: &OutputOptions,
+    renderer: &Arc<Mutex<R>>,
+    clock: &Clock,
+    shared: &Arc<Shared>,
+    paused: bool,
+) -> Result<Live, OpenError> {
+    let host = cpal::default_host();
+    let (device, default_at_open) = pick(&host, &options.device)?;
+    let name = device_name(&device).map_err(OpenError::from_backend)?;
+    let default = device
+        .default_output_config()
+        .map_err(OpenError::from_display)?;
+    let format = default.sample_format();
+    let range = match *default.buffer_size() {
+        cpal::SupportedBufferSize::Range { min, max } => Some((min, max)),
+        cpal::SupportedBufferSize::Unknown => None,
+    };
+    let buffer = match options.buffer {
+        crate::Buffer::Driver => None,
+        crate::Buffer::Fixed(size) => Some(size),
+        crate::Buffer::FixedOnWindows(size) => cfg!(windows).then_some(size),
+    };
+    let channels = if options.channels == 0 {
+        default.channels()
+    } else {
+        options.channels
+    };
+
+    #[cfg(target_os = "android")]
+    let default_rate = default.sample_rate().0;
+    #[cfg(not(target_os = "android"))]
+    let default_rate = default.sample_rate();
+    let mut tried = plan::attempts(options.sample_rate, default_rate, buffer, range)
+        .into_iter()
+        .map(|attempt| (attempt, channels, format))
+        .collect::<Vec<_>>();
+    // Then anything else the device lists, with the driver's buffer.
+    if let Ok(configs) = device.supported_output_configs() {
+        for config in configs {
+            #[cfg(target_os = "android")]
+            let rate = default_rate.clamp(config.min_sample_rate().0, config.max_sample_rate().0);
+            #[cfg(not(target_os = "android"))]
+            let rate = default_rate.clamp(config.min_sample_rate(), config.max_sample_rate());
+            let candidate = (
+                Attempt {
+                    sample_rate: rate,
+                    buffer_frames: None,
+                },
+                config.channels(),
+                config.sample_format(),
+            );
+            if !tried.contains(&candidate) {
+                tried.push(candidate);
+            }
+        }
+    }
+
+    let mut last_error = None;
+    for (attempt, channels, format) in tried {
+        let config = cpal::StreamConfig {
+            channels,
+            #[cfg(target_os = "android")]
+            sample_rate: cpal::SampleRate(attempt.sample_rate),
+            #[cfg(not(target_os = "android"))]
+            sample_rate: attempt.sample_rate,
+            buffer_size: attempt
+                .buffer_frames
+                .map_or(cpal::BufferSize::Default, cpal::BufferSize::Fixed),
+        };
+        renderer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .configure(attempt.sample_rate, channels);
+        match build(
+            &device,
+            &config,
+            format,
+            Arc::clone(renderer),
+            clock.clone(),
+            Arc::clone(shared),
+            options.max_block_frames,
+        ) {
+            Ok(stream) => {
+                clock.restart(attempt.sample_rate);
+                shared.failed.store(false, Ordering::Release);
+                if !paused {
+                    stream.play().map_err(OpenError::from_display)?;
+                }
+                log::info!(
+                    "audio output: {name} at {} Hz, {channels} channels, {}",
+                    attempt.sample_rate,
+                    attempt
+                        .buffer_frames
+                        .map_or("the driver's buffer".to_owned(), |frames| format!(
+                            "{frames} frames"
+                        ))
+                );
+                return Ok(Live {
+                    stream,
+                    device: name,
+                    sample_rate: attempt.sample_rate,
+                    channels,
+                    default_at_open,
+                });
+            }
+            Err(error) => {
+                log::debug!("audio output: {name} refused {config:?} as {format}: {error}");
+                last_error = Some(error);
+            }
+        }
+    }
+    Err(last_error.map_or(OpenError::NoDevice, OpenError::from_backend))
+}
+
+/// The device to open, and the default output's name when that is the one.
+fn pick(host: &cpal::Host, wanted: &Device) -> Result<(cpal::Device, Option<String>), OpenError> {
+    let wanted = match wanted {
+        Device::Default => None,
+        Device::Named(name) => Some(name.as_str()),
+    };
+    if wanted.is_some() {
+        let (names, devices) = plan::named(
+            host.output_devices().map_err(OpenError::from_display)?,
+            |device| device_name(device).ok(),
+        );
+        match plan::choose(&names, wanted) {
+            Choice::Named(index) => {
+                if let Some(device) = devices.into_iter().nth(index) {
+                    return Ok((device, None));
+                }
+            }
+            Choice::Default { missing } => {
+                if let Some(missing) = missing {
+                    log::warn!(
+                        "audio device {missing:?} is not available; using the default output"
+                    );
+                }
+            }
+        }
+    }
+    let device = host.default_output_device().ok_or(OpenError::NoDevice)?;
+    let name = device_name(&device).map_err(OpenError::from_backend)?;
+    Ok((device, Some(name)))
+}
+
+/// The device's name. A device that is going away can fail to describe
+/// itself, and cpal's `Display` turns that into a `fmt::Error`, which
+/// `to_string` panics on. This asks for the description instead.
+fn device_name(device: &cpal::Device) -> Result<String, BackendError> {
+    #[cfg(target_os = "android")]
+    return Ok(device.name()?);
+    #[cfg(not(target_os = "android"))]
+    Ok(device.description()?.name().to_owned())
+}
+
+/// Builds a stream that renders through `renderer` in the device's sample
+/// format.
+fn build<R: Render>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    format: cpal::SampleFormat,
+    renderer: Arc<Mutex<R>>,
+    clock: Clock,
+    shared: Arc<Shared>,
+    max_block_frames: Option<u32>,
+) -> Result<cpal::Stream, BackendError> {
+    use cpal::SampleFormat as F;
+    let args = (device, config, renderer, clock, shared, max_block_frames);
+    macro_rules! typed {
+        ($sample:ty) => {
+            typed::<$sample, R>(args)
+        };
+    }
+    match format {
+        F::F32 => typed!(f32),
+        F::F64 => typed!(f64),
+        F::I8 => typed!(i8),
+        F::I16 => typed!(i16),
+        #[cfg(not(target_os = "android"))]
+        F::I24 => typed!(cpal::I24),
+        F::I32 => typed!(i32),
+        F::I64 => typed!(i64),
+        F::U8 => typed!(u8),
+        F::U16 => typed!(u16),
+        #[cfg(not(target_os = "android"))]
+        F::U24 => typed!(cpal::U24),
+        F::U32 => typed!(u32),
+        F::U64 => typed!(u64),
+        other => Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("unsupported sample format {other}"),
+        ))),
+    }
+}
+
+type BuildArgs<'a, R> = (
+    &'a cpal::Device,
+    &'a cpal::StreamConfig,
+    Arc<Mutex<R>>,
+    Clock,
+    Arc<Shared>,
+    Option<u32>,
+);
+
+fn typed<T, R>(
+    (device, config, renderer, clock, shared, max_block): BuildArgs<'_, R>,
+) -> Result<cpal::Stream, BackendError>
+where
+    T: cpal::SizedSample + cpal::FromSample<f32>,
+    R: Render,
+{
+    let channels = usize::from(config.channels);
+    let mut scratch: Vec<f32> = Vec::new();
+    let errors = Arc::clone(&shared);
+    #[cfg(target_os = "android")]
+    let config = config;
+    #[cfg(not(target_os = "android"))]
+    let config = *config;
+    device
+        .build_output_stream::<T, _, _>(
+            config,
+            move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
+                #[cfg(target_os = "windows")]
+                crate::mmcss::join_once();
+                scratch.clear();
+                scratch.resize(data.len(), 0.0);
+                // The app's thread only takes the lock while (re)opening, before
+                // the stream starts; a contended lock renders silence rather
+                // than wait.
+                let rendered = match renderer.try_lock() {
+                    Ok(mut renderer) => {
+                        for (start, end) in plan::blocks(scratch.len(), channels, max_block) {
+                            renderer.render(&mut scratch[start..end]);
+                        }
+                        true
+                    }
+                    Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                        let mut renderer = poisoned.into_inner();
+                        for (start, end) in plan::blocks(scratch.len(), channels, max_block) {
+                            renderer.render(&mut scratch[start..end]);
+                        }
+                        true
+                    }
+                    Err(std::sync::TryLockError::WouldBlock) => false,
+                };
+                for (out, sample) in data.iter_mut().zip(&scratch) {
+                    *out = if rendered {
+                        T::from_sample(*sample)
+                    } else {
+                        T::EQUILIBRIUM
+                    };
+                }
+                let timestamp = info.timestamp();
+                #[cfg(target_os = "android")]
+                let latency = timestamp
+                    .playback
+                    .duration_since(&timestamp.callback)
+                    .unwrap_or_default();
+                #[cfg(not(target_os = "android"))]
+                let latency = timestamp
+                    .playback
+                    .saturating_duration_since(timestamp.callback);
+                clock.rendered((data.len() / channels.max(1)) as u64, latency);
+            },
+            move |error| errors.report(error),
+            None,
+        )
+        .map_err(|error| Box::new(error) as BackendError)
+}
+
+/// The default output's name, or `None` when there is none or it cannot be
+/// named just now.
+pub(crate) fn default_output_name() -> Option<String> {
+    cpal::default_host()
+        .default_output_device()
+        .and_then(|device| device_name(&device).ok())
+}
+
+/// Every output device's name. Nothing is opened. A device that cannot be
+/// named is left out.
+pub(crate) fn output_device_names() -> Result<Vec<String>, OpenError> {
+    Ok(cpal::default_host()
+        .output_devices()
+        .map_err(OpenError::from_display)?
+        .filter_map(|device| device_name(&device).ok())
+        .collect())
+}
+
+/// The default output's name, polled on a thread of its own because
+/// enumerating devices can block on Windows. The thread ends with the watch.
+#[derive(Debug)]
+pub(crate) struct DefaultWatch(Arc<Mutex<Option<String>>>);
+
+/// How often the default output is asked for.
+const DEFAULT_CHECK_INTERVAL: Duration = Duration::from_secs(2);
+
+impl DefaultWatch {
+    pub(crate) fn start(initial: Option<String>) -> Self {
+        let shared = Arc::new(Mutex::new(initial));
+        let weak = Arc::downgrade(&shared);
+        let started = std::thread::Builder::new()
+            .name("audio-default-watch".into())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(DEFAULT_CHECK_INTERVAL);
+                    let Some(shared) = weak.upgrade() else {
+                        break;
+                    };
+                    let name = default_output_name();
+                    *shared.lock().unwrap_or_else(PoisonError::into_inner) = name;
+                }
+            });
+        if let Err(error) = started {
+            log::warn!("cannot watch the default audio output: {error}");
+        }
+        Self(shared)
+    }
+
+    /// The last polled name.
+    pub(crate) fn name(&self) -> Option<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}

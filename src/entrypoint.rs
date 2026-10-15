@@ -3,9 +3,14 @@ use spotifast::{app, backend, paths, settings, single_instance, util};
 use clap::{CommandFactory, FromArgMatches, Parser};
 use fastframe_shell::window::Geometry;
 
+#[cfg(target_os = "android")]
+thread_local! {
+    static ANDROID_APP: std::cell::RefCell<Option<winit::platform::android::activity::AndroidApp>> = const { std::cell::RefCell::new(None) };
+}
+
 /// A fast, native Spotify client.
 #[derive(Debug, Parser)]
-#[command(name = env!("CARGO_BIN_NAME"), version, about)]
+#[command(name = env!("CARGO_PKG_NAME"), version, about)]
 struct Cli {
     /// A command for the running instance; without one, the app starts.
     #[command(subcommand)]
@@ -363,7 +368,11 @@ fn format_devices(snapshot: &str) -> String {
         .collect()
 }
 
-pub(crate) fn run() -> eframe::Result<()> {
+pub fn run(
+    #[cfg(target_os = "android")] android_app: winit::platform::android::activity::AndroidApp,
+) -> eframe::Result<()> {
+    #[cfg(target_os = "android")]
+    ANDROID_APP.with(|current| *current.borrow_mut() = Some(android_app));
     #[cfg(target_os = "linux")]
     configure_pulseaudio_properties();
     // First of all: `--apply-update <job>` makes this process the update
@@ -495,6 +504,10 @@ pub(crate) fn run() -> eframe::Result<()> {
     // icon of its own, and no second MPRIS service to fight over media keys.
     #[allow(unused_mut)]
     let mut options = app::AppOptions::default();
+    #[cfg(target_os = "android")]
+    {
+        options.tray = false;
+    }
     #[cfg(feature = "demo")]
     if demo {
         options.restore_sign_in = false;
@@ -878,12 +891,15 @@ fn native_options(
             }
         }
     };
-    eframe::NativeOptions {
+    let mut options = eframe::NativeOptions {
         viewport,
         persist_window,
         persistence_path,
         ..Default::default()
-    }
+    };
+    #[cfg(target_os = "android")]
+    ANDROID_APP.with(|app| options.android_app = app.borrow().clone());
+    options
 }
 
 fn profile_options(mut options: eframe::NativeOptions) -> eframe::NativeOptions {

@@ -22,7 +22,6 @@ use crate::http::Http;
 const BASE_URL: &str = "https://api.spotify.com/v1";
 const MAX_IN_FLIGHT: usize = 6;
 const MAX_BACKGROUND_IN_FLIGHT: usize = 4;
-const RATE_LIMIT_RETRIES: u32 = 3;
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, Error)]
@@ -61,7 +60,9 @@ impl From<reqwest::Error> for ApiError {
         if error.is_decode() {
             Self::Decode(error.to_string())
         } else {
-            Self::Network(error.to_string())
+            let message = error.to_string();
+            log::warn!("Spotify HTTP transport detail: {:#?}", error.without_url());
+            Self::Network(message)
         }
     }
 }
@@ -490,7 +491,7 @@ impl ApiClient {
         response.json().await.map_err(ApiError::from)
     }
 
-    async fn wait_for_cooldown(&self) {
+    pub(crate) async fn wait_for_cooldown(&self) {
         loop {
             let until = *self.cooldown_until.lock().await;
             let Some(wait) = until.checked_duration_since(Instant::now()) else {
@@ -498,6 +499,10 @@ impl ApiClient {
             };
             tokio::time::sleep(wait).await;
         }
+    }
+
+    async fn cooldown_active(&self) -> bool {
+        *self.cooldown_until.lock().await > Instant::now()
     }
 
     async fn extend_cooldown(&self, wait: Duration) {
@@ -550,9 +555,13 @@ impl ApiClient {
                 .acquire()
                 .await
                 .map_err(|_| ApiError::NotSignedIn)?;
-            // After the permit: a 429 answered while this request queued has
-            // extended the cooldown, and sending now would only earn another.
-            self.wait_for_cooldown().await;
+            // Queue writes retry safely after Retry-After. Other requests fail
+            // fast during cooldown so every screen can leave its loading state.
+            if queue_write {
+                self.wait_for_cooldown().await;
+            } else if self.cooldown_active().await {
+                return Err(ApiError::RateLimited);
+            }
             let token = provider.access_token().await?;
             let mut request = self
                 .http
@@ -591,21 +600,25 @@ impl ApiClient {
                 }
                 // A rejected queue append is safe to retry. Keep its place
                 // in the write lock and honor the full server-requested wait.
-                // Other requests retain their existing bounded retry policy.
+                // Other requests surface the shared cooldown immediately.
                 let wait = if queue_write {
                     wait
                 } else {
                     wait.min(MAX_RETRY_AFTER)
                 };
-                log::warn!("Spotify rate limit source={} wait={wait:?}", self.source);
+                log::warn!(
+                    "Spotify rate limit source={} path={} wait={wait:?}",
+                    self.source,
+                    logged_path(path)
+                );
                 log::info!(
                     "Spotify cooldown source={} duration_ms={}",
                     self.source,
                     wait.as_millis()
                 );
-                drop(permit);
                 self.extend_cooldown(wait).await;
-                if !queue_write && attempt > RATE_LIMIT_RETRIES {
+                drop(permit);
+                if !queue_write {
                     return Err(ApiError::RateLimited);
                 }
                 continue;
@@ -1601,8 +1614,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_request_queued_for_a_permit_waits_out_a_cooldown_set_meanwhile() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    async fn a_request_queued_for_a_permit_fails_fast_when_cooldown_set_meanwhile() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let client = Arc::new(client_with_token(
             Some(format!("http://{}", listener.local_addr().unwrap())),
@@ -1619,22 +1631,13 @@ mod tests {
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
         client.extend_cooldown(Duration::from_millis(400)).await;
-        let cooldown_started = Instant::now();
         drop(permits);
-        let (mut socket, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(cooldown_started.elapsed() >= Duration::from_millis(350));
-        let mut request = Vec::new();
-        while !request.ends_with(b"\r\n\r\n") {
-            request.push(socket.read_u8().await.unwrap());
-        }
-        socket
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
-            .await
-            .unwrap();
-        assert_eq!(queued.await.unwrap().unwrap(), "{}");
+        assert!(matches!(queued.await.unwrap(), Err(ApiError::RateLimited)));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
